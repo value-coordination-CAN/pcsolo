@@ -1,0 +1,11 @@
+# build outputs
+*.exe
+*.o
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# generated ONNX graphs (rebuild with onnx-sha/gen_sha256d.py)
+*.onnx
