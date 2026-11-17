@@ -13,6 +13,8 @@ If it ever finds a block, almost the whole reward (3.125 BTC + fees, minus a sma
 >
 > At network difficulty ~135T the expected time to a block is **~53 million years**. This is a lottery ticket, not income.
 
+**Background:** why this miner exists, and what its numbers say about "one CPU, one vote": [Eighteen Years On, Satoshi's 2008 Promise Has a New Delivery Date: Roughly 640,000 Human Lifetimes Away](https://claude.ai/artifact/CfuUmCvUMjKm83C8xxfDWH).
+
 ## Run (PowerShell)
 
 ```powershell
