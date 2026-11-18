@@ -196,6 +196,28 @@ Result: self-test passes both ways (genesis found, 65/65 (nonce, version) candid
 
 That is the predicted size: about 4 instructions saved out of roughly 1,500 per version-hash. It is at the edge of what the benchmark can resolve, because the rates come in steps of ~0.4 MH/s. The kernel is now at the practical minimum; what remains is the unavoidable ~61 + 60 SHA rounds and two message schedules per hash, and the 31 W power cap sets the speed.
 
+## Occupancy and instruction-level parallelism (v1.5, 2026-11-18)
+
+Two questions about the ×8 kernel:
+- **Occupancy:** does 80 registers per thread (25 of 32 warps per SM) hold it back?
+- **ILP:** would running independent hashes interleaved inside one thread hide the SHA-256 dependency chain better?
+
+Experiment `--gpu-ilp 2`: the same kernel, but two header versions run in `uint2` lanes. Every SHA step then issues two independent instructions. It is self-tested (genesis, 65/65 (nonce, version) candidates match the scalar path) and benchmarked GPU-only after a 40 s warm-up.
+
+| Variant | Registers / spill / warps per SM | MH/s |
+|---|---|---|
+| **×8, one version per pass (default)** | 80 / 0 B / 25 | **278.5** (median of 8) |
+| ×8, two versions interleaved (`--gpu-ilp 2`) | 122 / 0 B / 16 | 272.9 (median of 8), **−1.6%**, lower in 7 of 8 alternating pairs |
+| ILP×2 + register cap 96 | 96 / 36 B / 21 | ~272 (2 runs) |
+| ILP×2 + register cap 80 | 80 / 100 B / 25 | ~270 (2 runs) |
+
+What this shows, together with the earlier register-cap results (72 regs → 28 warps: −1.7%; 64 regs → 32 warps: −8.6%):
+- **Occupancy is not the limit.** Going from 25 down to 16 warps per SM costs only ~1.6%, even with extra ILP added. Going up to 28–32 warps costs more because of spills. A Turing SM has 4 schedulers and ~4-cycle ALU latency, so 25 warps (about 6 per scheduler) already hide the dependency chain.
+- **The kernel already has ILP.** Within each SHA round, the `t1` path (Σ1, Ch, +K+W) and the `t2` path (Σ0, Maj) are independent, and the message-schedule words can be computed ahead. The compiler interleaves these already.
+- **The real limit is arithmetic throughput under the 31 W power cap** (throttle reason 0x4 is active during every run). More parallelism can't help once every ALU slot is in use; it only adds register pressure.
+
+Default stays `--gpu-ilp 1`.
+
 ## Version rolling benchmark (v1.4, 2026-11-17, idle machine)
 
 Interleaved A/B, GPU only, 12 s each:

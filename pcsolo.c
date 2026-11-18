@@ -716,6 +716,59 @@ static const char *KSRC_VR =
 "  }\n"
 "}\n";
 
+/* --gpu-ilp 2 experiment: the same work as search_vrn (EXTRA_PRE + SECOND_PRE), but two versions run
+ * interleaved in uint2 lanes, so every SHA step issues two independent instructions (instruction-level
+ * parallelism) instead of relying only on other warps to hide the dependency latency. */
+static const char *KSRC_VR2 =
+"#undef ROTR\n"
+"#define ROTR(x,n) rotate((x), (x)*0u + (32u-(n)))\n"
+"__kernel void search_vr2(__constant uint *VD, uint4 WC, uint n0, uint limit, __global uint *out) {\n"
+"  uint nonce = n0 + (uint)get_global_id(0);\n"
+"  uint w3 = BSWAP(nonce);\n"
+"  uint W[64];\n"
+"  W[3] = w3; W[4] = 0x80000000u;\n"
+"  #pragma unroll\n"
+"  for (int i = 5; i < 15; i++) W[i] = 0;\n"
+"  W[15] = 640u; W[16] = WC.s0; W[17] = WC.s1; W[18] = WC.s2 + s0(w3); W[19] = WC.s3 + w3;\n"
+"  #pragma unroll\n"
+"  for (int i = 20; i < 64; i++) W[i] = s1(W[i-2]) + W[i-7] + s0(W[i-15]) + W[i-16];\n"
+"  #pragma unroll\n"
+"  for (int v = 0; v < NVER; v += 2) {\n"
+"    __constant uint *X = VD + v * 20, *Y = X + 20;\n"
+"    #define P(i) ((uint2)(X[i], Y[i]))\n"
+"    uint2 a3 = P(0) + w3, e3 = P(1) + w3;\n"
+"    uint2 s = S1(e3) + CH(e3, P(4), P(5));\n"
+"    uint2 a4 = P(6) + s + S0(a3) + MAJ(a3, P(2), P(3)), e4 = P(7) + s;\n"
+"    s = S1(e4) + CH(e4, e3, P(4));\n"
+"    uint2 a5 = P(16) + s + S0(a4) + MAJ(a4, a3, P(2)), e5 = P(17) + s;\n"
+"    s = S1(e5) + CH(e5, e4, e3);\n"
+"    uint2 a6 = P(18) + s + S0(a5) + MAJ(a5, a4, a3), e6 = P(19) + s;\n"
+"    uint2 a=a6,b=a5,c=a4,d=a3,e=e6,f=e5,g=e4,h=e3, t1;\n"
+"    #pragma unroll\n"
+"    for (int i = 7; i < 64; i++) {\n"
+"      t1 = h + S1(e) + CH(e,f,g) + K[i] + W[i]; uint2 t2 = S0(a) + MAJ(a,b,c);\n"
+"      h=g; g=f; f=e; e=d+t1; d=c; c=b; b=a; a=t1+t2;\n"
+"    }\n"
+"    uint2 V[61];\n"
+"    V[0]=P(8)+a; V[1]=P(9)+b; V[2]=P(10)+c; V[3]=P(11)+d; V[4]=P(12)+e; V[5]=P(13)+f; V[6]=P(14)+g; V[7]=P(15)+h;\n"
+"    V[8]=(uint2)(0x80000000u); V[9]=V[10]=V[11]=V[12]=V[13]=V[14]=(uint2)(0u); V[15]=(uint2)(256u);\n"
+"    #pragma unroll\n"
+"    for (int i = 16; i < 61; i++) V[i] = s1(V[i-2]) + V[i-7] + s0(V[i-15]) + V[i-16];\n"
+"    uint2 A = SP_A + V[0], B = (uint2)(0x6a09e667u), C = (uint2)(0xbb67ae85u), D = (uint2)(0x3c6ef372u);\n"
+"    uint2 E = SP_E + V[0], F = (uint2)(0x510e527fu), G = (uint2)(0x9b05688cu), H = (uint2)(0x1f83d9abu);\n"
+"    #pragma unroll\n"
+"    for (int i = 1; i <= 60; i++) {\n"
+"      uint2 u1 = H + S1(E) + CH(E,F,G) + K[i] + V[i], u2 = S0(A) + MAJ(A,B,C);\n"
+"      H=G; G=F; F=E; E=D+u1; D=C; C=B; B=A; A=u1+u2;\n"
+"    }\n"
+"    uint2 H7 = 0x5be0cd19u + E;\n"
+"    if (BSWAP(H7.x) <= limit) { uint q = atomic_inc(&out[0]); if (q < 127u) { out[1+2*q] = nonce; out[2+2*q] = (uint)v; } }\n"
+"    if (BSWAP(H7.y) <= limit) { uint q = atomic_inc(&out[0]); if (q < 127u) { out[1+2*q] = nonce; out[2+2*q] = (uint)v+1u; } }\n"
+"    #undef P\n"
+"  }\n"
+"}\n";
+static int gpuIlp = 1;             /* --gpu-ilp 2: two versions interleaved per pass (experiment) */
+
 #define VR_REQ_MASK 0x1fffe000u   /* BIP 320 general-purpose version bits */
 #define VR_MAX 16
 #define VDS 20                     /* uints of per-version kernel data */
@@ -807,7 +860,9 @@ static int gpu_init(void) {
     int baseRegs = -1, baseSpill = -1;
     if (nvVerbose) { static char lg[32768]; lg[0] = 0; p_clGetProgramBuildInfo(prog, dev, CL_PROGRAM_BUILD_LOG, sizeof lg - 1, lg, NULL); parse_ptxas(lg, "search", &baseRegs, &baseSpill); }
     if (wantVR) {   /* version-rolling kernel for the chosen version count */
-        const char *srcs[3] = {KSRC, KSRC_VR, KSRC_TAG};
+        if (gpuIlp == 2 && (vrCount < 2 || !extraPre || !secondPre)) { printf("GPU: --gpu-ilp 2 needs >= 2 versions with the default precomputes; using 1\n"); gpuIlp = 1; }
+        const char *kname = gpuIlp == 2 ? "search_vr2" : "search_vrn";
+        const char *srcs[3] = {KSRC, gpuIlp == 2 ? KSRC_VR2 : KSRC_VR, KSRC_TAG};
         char extra[160] = "";
         int xn = 0;
         if (secondPre) {   /* second hash round 0 from the constant IV: t1 = C0 + W0, t2 = T0 */
@@ -822,13 +877,13 @@ static int gpu_init(void) {
         e = p_clBuildProgram(pvr, 1, &dev, opts, NULL, NULL);
         p_clGetProgramBuildInfo(pvr, dev, CL_PROGRAM_BUILD_LOG, sizeof lg - 1, lg, NULL);
         if (e) { printf("GPU: version-rolling kernel build failed (%d):\n%s\n", e, lg); return -1; }
-        gkvr = p_clCreateKernel(pvr, "search_vrn", &e); if (e) { printf("GPU: kernel error %d\n", e); return -1; }
+        gkvr = p_clCreateKernel(pvr, kname, &e); if (e) { printf("GPU: kernel error %d\n", e); return -1; }
         for (int i = 0; i < 4; i++) {
             gvd[i] = p_clCreateBuffer(ctx, 4 /* CL_MEM_READ_ONLY */, VR_MAX * VDS * 4, NULL, &e);
             if (e) { printf("GPU: buffer error %d\n", e); return -1; }
         }
         if (getenv("PCSOLO_KLOG")) printf("---- version-rolling kernel build log (%s) ----\n%s\n----\n", opts, lg);
-        int r = -1, s = -1; if (nvVerbose) parse_ptxas(lg, "search_vrn", &r, &s);
+        int r = -1, s = -1; if (nvVerbose) parse_ptxas(lg, kname, &r, &s);
         char basePart[64] = "";   /* the normal kernel's log is empty when the driver serves it from its cache */
         if (baseRegs > 0) snprintf(basePart, sizeof basePart, " (normal kernel: %d registers, %d/32 warps)", baseRegs, warps_per_sm(baseRegs));
         if (r > 0)
@@ -1616,6 +1671,7 @@ static void usage(void) {
            "      --versions <n>     header versions per nonce for --version-roll: 1, 2, 4, 8 (default) or 16\n"
            "      --no-second-pre    don't precompute the second hash's first round (experiment)\n"
            "      --no-extra-pre     don't fold the constant parts of rounds 3-6 (experiment)\n"
+           "      --gpu-ilp 1|2      versions interleaved per pass in the GPU kernel (experiment, default 1)\n"
            "      --gpu-maxregs <n>  NVIDIA register cap for the version-rolling kernel (experiment; slower here)\n"
            "      --gpu-local <n>    fixed GPU workgroup size (experiment; driver default is fastest here)\n"
            "      --normal-priority  don't drop to idle priority\n"
@@ -1681,6 +1737,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--no-second-pre")) secondPre = 0;
         else if (!strcmp(a, "--extra-pre")) extraPre = 1;
         else if (!strcmp(a, "--no-extra-pre")) extraPre = 0;
+        else if (!strcmp(a, "--gpu-ilp")) gpuIlp = atoi(NEXT()) == 2 ? 2 : 1;
         else if (!strcmp(a, "--gpu-maxregs")) gpuMaxRegs = atoi(NEXT());
         else if (!strcmp(a, "--gpu-local")) gpuLocal = (size_t)atoi(NEXT());
         else if (!strcmp(a, "--normal-priority")) normalPrio = 1;
