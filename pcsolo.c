@@ -460,6 +460,7 @@ static cl_command_queue (CLAPI *p_clCreateCommandQueue)(cl_context, cl_device_id
 static cl_program (CLAPI *p_clCreateProgramWithSource)(cl_context, cl_uint, const char **, const size_t *, cl_int *);
 static cl_int (CLAPI *p_clBuildProgram)(cl_program, cl_uint, const cl_device_id *, const char *, void *, void *);
 static cl_int (CLAPI *p_clGetProgramBuildInfo)(cl_program, cl_device_id, cl_uint, size_t, void *, size_t *);
+static cl_int (CLAPI *p_clGetProgramInfo)(cl_program, cl_uint, size_t, void *, size_t *);
 static cl_kernel (CLAPI *p_clCreateKernel)(cl_program, const char *, cl_int *);
 static cl_mem (CLAPI *p_clCreateBuffer)(cl_context, cl_bitfield, size_t, void *, cl_int *);
 static cl_int (CLAPI *p_clSetKernelArg)(cl_kernel, cl_uint, size_t, const void *);
@@ -818,6 +819,7 @@ static int gpu_init(void) {
 #define LOADCL(f) if (!(*(FARPROC *)&p_##f = GetProcAddress(h, #f))) { printf("GPU: missing " #f "\n"); return -1; }
     LOADCL(clGetPlatformIDs) LOADCL(clGetPlatformInfo) LOADCL(clGetDeviceIDs) LOADCL(clGetDeviceInfo)
     LOADCL(clCreateContext) LOADCL(clCreateCommandQueue) LOADCL(clCreateProgramWithSource) LOADCL(clBuildProgram)
+    LOADCL(clGetProgramInfo)
     LOADCL(clGetProgramBuildInfo) LOADCL(clCreateKernel) LOADCL(clCreateBuffer) LOADCL(clSetKernelArg)
     LOADCL(clEnqueueNDRangeKernel) LOADCL(clEnqueueReadBuffer) LOADCL(clEnqueueWriteBuffer) LOADCL(clFlush)
 
@@ -881,6 +883,15 @@ static int gpu_init(void) {
         for (int i = 0; i < 4; i++) {
             gvd[i] = p_clCreateBuffer(ctx, 4 /* CL_MEM_READ_ONLY */, VR_MAX * VDS * 4, NULL, &e);
             if (e) { printf("GPU: buffer error %d\n", e); return -1; }
+        }
+        if (getenv("PCSOLO_KBIN")) {   /* dump the driver's compiled program (for ptxas / nvdisasm analysis) */
+            size_t bs = 0; p_clGetProgramInfo(pvr, 0x1165 /* CL_PROGRAM_BINARY_SIZES */, sizeof bs, &bs, NULL);
+            unsigned char *bin = malloc(bs + 1); FILE *bf = bin ? fopen(getenv("PCSOLO_KBIN"), "wb") : NULL;
+            if (bf && !p_clGetProgramInfo(pvr, 0x1166 /* CL_PROGRAM_BINARIES */, sizeof bin, &bin, NULL)) {
+                fwrite(bin, 1, bs, bf); printf("GPU: wrote %u bytes of kernel binary to %s\n", (unsigned)bs, getenv("PCSOLO_KBIN"));
+            }
+            if (bf) fclose(bf);
+            free(bin);
         }
         if (getenv("PCSOLO_KLOG")) printf("---- version-rolling kernel build log (%s) ----\n%s\n----\n", opts, lg);
         int r = -1, s = -1; if (nvVerbose) parse_ptxas(lg, kname, &r, &s);

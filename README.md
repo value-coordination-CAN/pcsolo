@@ -218,6 +218,35 @@ What this shows, together with the earlier register-cap results (72 regs → 28 
 
 Default stays `--gpu-ilp 1`.
 
+## Compiled instruction count and throughput ceiling (2026-11-18)
+
+Instead of more kernel changes: how many machine instructions does a hash really cost, and how close is the T400 to its limit?
+
+Method: `PCSOLO_KBIN=<file>` makes pcsolo dump the driver's compiled program, which is PTX text for `sm_75`. CUDA Toolkit 13.5 turns it into machine code and disassembles it: `ptxas -arch=sm_75 -o k.cubin k.ptx`, then `nvdisasm -c k.cubin`. `ptxas` reports the same register counts as the driver (80 and 42), so the code should match what the driver runs. Both kernels are straight-line code: the only branches skip the rare candidate-report block, so the static count is the executed count.
+
+| Kernel | Instructions per work-item | Hashes per work-item | **Instructions per hash** |
+|---|---|---|---|
+| Normal (`search`) | 2,496 | 1 | **~2,475** |
+| Version rolling ×8 (`search_vrn`) | 17,320 | 8 | **~2,150** |
+
+- The ×8 kernel needs 13% fewer instructions per hash, which matches its measured +13% speed.
+- Instruction mix of the ×8 kernel: 45% shifts/rotates (`SHF`), 26% 3-input logic (`LOP3`), 19% 3-input adds (`IADD3`), 8% 2-input adds placed on the multiplier unit (`IMAD.IADD`). Under 2% is anything else: there are no register moves and no wasted work to remove.
+
+Ceiling, with the simple model "each of the T400's 384 cores executes one instruction per clock cycle":
+
+| | Clock | Ceiling | Measured | Share of ceiling |
+|---|---|---|---|---|
+| Sustained while mining (power cap active, flag 0x4) | ~1,815 MHz | ~323 MH/s | 278–281 MH/s | **~87%** |
+| GPU's maximum clock (`clocks.max.sm`) | 2,100 MHz | ~374 MH/s | – | ~75% |
+
+What this means:
+- **The kernel runs at about 87% of what the chip can do at its sustained clock.** The earlier rough guess (1,500 instructions, ceiling 460 MH/s, 60% used) was wrong: the real count is ~2,150.
+- **The largest remaining gap is the clock, not the code.** The power cap holds the GPU ~14% below its maximum clock. That is a hardware and firmware limit of this laptop.
+- **Software headroom is at most ~13%**, and part of that is unavoidable (launch gaps, warp scheduling, 25 of 32 warps resident).
+- Efficiency: ~280 MH/s at the ~31 W cap is roughly **9 MH per joule**. The 31 W is the cap, not a reading, because `nvidia-smi` reports no power draw on this laptop. A current mining ASIC is several thousand times more efficient.
+
+Caveats: the one-instruction-per-core-per-cycle model is a simplification, and the toolkit's `ptxas` may differ slightly from the one inside the driver.
+
 ## Version rolling benchmark (v1.4, 2026-11-17, idle machine)
 
 Interleaved A/B, GPU only, 12 s each:
