@@ -1165,6 +1165,22 @@ static void payout_check(const Job *j) {
     else logf_("Payout check: %.8f BTC (%.2f%%) to YOUR address%s", (double)mine / 1e8, 100.0 * (double)mine / (double)total, o);
 }
 
+/* Height of the block this job would create. BIP 34 puts it at the start of the coinbase input script. */
+static long job_height(const Job *j) {
+    const uint8_t *c = j->cb1; int n = j->cb1len;
+    int pos = (n > 6 && c[4] == 0 && c[5] == 1) ? 6 : 4;
+    uint64_t v;
+    if (rd_varint(c, n, &pos, &v) || v != 1) return 0;     /* input count */
+    pos += 36;                                             /* previous output (all zero for a coinbase) */
+    if (rd_varint(c, n, &pos, &v)) return 0;               /* script length */
+    if (pos >= n) return 0;
+    int len = c[pos++];                                    /* size of the height number, 1 to 4 bytes */
+    if (len < 1 || len > 4 || pos + len > n) return 0;
+    long h = 0;
+    for (int i = 0; i < len; i++) h += (long)c[pos + i] << (8 * i);
+    return h;
+}
+
 static void on_notify(J *p) {
     if (!en1ok || !p || p->t != JARR || p->len < 8) return;
     static Job j; /* only touched by the network thread */
@@ -1194,7 +1210,20 @@ static void on_notify(J *p) {
     gjob = j; jobGen++; haveJob = 1;
     ReleaseSRWLockExclusive(&jobLock);
     char b[32];
-    if (newBlock) { logf_("New block template | network difficulty %s", fmtn(j.netdiff, b)); payout_check(&j); }
+    if (newBlock) {
+        static ULONGLONG lastTick;
+        ULONGLONG now = GetTickCount64();
+        long height = job_height(&j);
+        char hs[48] = "", ts[64] = "";
+        if (height > 0) snprintf(hs, sizeof hs, " for block %ld", height);
+        if (lastTick) {
+            unsigned long s = (unsigned long)((now - lastTick) / 1000);
+            snprintf(ts, sizeof ts, " | previous block took %lum %02lus", s / 60, s % 60);
+        }
+        lastTick = now;
+        logf_("New block template%s | network difficulty %s%s", hs, fmtn(j.netdiff, b), ts);
+        payout_check(&j);
+    }
 }
 
 static void log_share_result(long long id, int ok, const char *err);

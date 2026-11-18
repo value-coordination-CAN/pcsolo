@@ -50,6 +50,17 @@ Every 15 s it prints the hashrate (CPU/GPU split), accepted/rejected shares, bes
 - The definitive check is your address on `https://mempool.space/address/<your address>`. A win is an incoming coinbase payment of ~3.1+ BTC, spendable after 100 confirmations (~17 h).
 - Shares and "best diff" only show the miner is working. A block needs a best diff of about 135T.
 
+## Watching new blocks
+
+Each time anyone on the network finds a block, the pool sends work for the next one, and pcsolo logs it:
+
+```
+[21:22:50] New block template for block 976489 | network difficulty 134.82T | previous block took 8m 12s
+```
+
+- The block number is the one your miner is now trying to find. It is read from the job itself (BIP 34 puts the height in the payout transaction).
+- "previous block took" is the time between two templates as seen by this miner, so it appears from the second block on. The average is 10 minutes, with large swings.
+
 ## Is the pool paying me? (payout check)
 
 You don't have to trust the pool about who gets paid. Every job contains the payout ("coinbase") transaction, and the miner hashes it into every header it tries. So the payout is fixed before a block is found, and the pool can't change it afterwards.
