@@ -50,6 +50,25 @@ Every 15 s it prints the hashrate (CPU/GPU split), accepted/rejected shares, bes
 - The definitive check is your address on `https://mempool.space/address/<your address>`. A win is an incoming coinbase payment of ~3.1+ BTC, spendable after 100 confirmations (~17 h).
 - Shares and "best diff" only show the miner is working. A block needs a best diff of about 135T.
 
+## Is the pool paying me? (payout check)
+
+You don't have to trust the pool about who gets paid. Every job contains the payout ("coinbase") transaction, and the miner hashes it into every header it tries. So the payout is fixed before a block is found, and the pool can't change it afterwards.
+
+On every new block template, pcsolo decodes that transaction and compares its outputs with your `--address`:
+
+```
+[18:04:48] New block template | network difficulty 134.82T
+[18:04:48] Payout check: 3.14986205 BTC (100.00%) to YOUR address
+```
+
+- If part of the reward goes elsewhere (a pool fee), the line shows how much and to how many other outputs.
+- If nothing goes to your address, it prints `Payout check: WARNING - this job pays NOTHING to your address`. Stop mining on that pool.
+- It understands `bc1…` (segwit and taproot), `1…` and `3…` addresses.
+
+Tested live on public-pool.io on 2026-11-18 with a `bc1q…` and a `1…` address: each run reported 100% to its own address.
+
+What it can't detect: a pool that receives your winning block and doesn't broadcast it. The pool would gain nothing from that, because the payout inside is yours.
+
 ## How it's optimised
 
 - **Midstate:** the first 64 bytes of the header are hashed once per work unit.

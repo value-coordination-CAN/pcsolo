@@ -1079,6 +1079,92 @@ static const char *err_text(J *e, char *buf) {
     strcpy(buf, e && e->t != JNULL ? "error" : "unknown"); return buf;
 }
 
+/* ======================= payout check =======================
+ * The pool sends the coinbase transaction with every job, and the miner hashes it into every header.
+ * So who gets paid is fixed before a block is found: decode the outputs and compare with --address. */
+static int addr_to_script(const char *a, uint8_t *out) {   /* address -> scriptPubKey; 0 = not understood */
+    static const char *B32 = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+    static const char *B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    if (!_strnicmp(a, "bc1", 3) || !_strnicmp(a, "tb1", 3)) {            /* segwit (bech32 / bech32m) */
+        uint8_t d[100]; int n = 0;
+        for (const char *p = a + 3; *p; p++) {
+            const char *q = strchr(B32, tolower((unsigned char)*p));
+            if (!q || n >= 100) return 0;
+            d[n++] = (uint8_t)(q - B32);
+        }
+        if (n < 8) return 0;
+        n -= 6;                                 /* checksum: not verified here, the pool rejects bad addresses */
+        int ver = d[0], bits = 0, plen = 0; uint32_t acc = 0; uint8_t prog[40];
+        for (int i = 1; i < n; i++) {
+            acc = (acc << 5) | d[i]; bits += 5;
+            if (bits >= 8) { bits -= 8; if (plen >= 40) return 0; prog[plen++] = (uint8_t)(acc >> bits); }
+        }
+        if (plen < 2 || ver > 16) return 0;
+        out[0] = ver ? (uint8_t)(0x50 + ver) : 0; out[1] = (uint8_t)plen; memcpy(out + 2, prog, plen);
+        return plen + 2;
+    }
+    uint8_t b[25] = {0};                                                   /* base58check: 1... / 3... */
+    for (const char *p = a; *p; p++) {
+        const char *q = strchr(B58, *p); if (!q) return 0;
+        int carry = (int)(q - B58);
+        for (int i = 24; i >= 0; i--) { carry += 58 * b[i]; b[i] = (uint8_t)carry; carry >>= 8; }
+        if (carry) return 0;
+    }
+    if (b[0] == 0x00) { out[0] = 0x76; out[1] = 0xa9; out[2] = 0x14; memcpy(out + 3, b + 1, 20); out[23] = 0x88; out[24] = 0xac; return 25; }
+    if (b[0] == 0x05) { out[0] = 0xa9; out[1] = 0x14; memcpy(out + 2, b + 1, 20); out[22] = 0x87; return 23; }
+    return 0;
+}
+
+static int rd_varint(const uint8_t *p, int n, int *pos, uint64_t *v) {
+    if (*pos >= n) return -1;
+    int c = p[(*pos)++], k = c < 0xfd ? 0 : c == 0xfd ? 2 : c == 0xfe ? 4 : 8;
+    if (!k) { *v = (uint64_t)c; return 0; }
+    if (*pos + k > n) return -1;
+    *v = 0; for (int i = 0; i < k; i++) *v |= (uint64_t)p[*pos + i] << (8 * i);
+    *pos += k; return 0;
+}
+
+/* Decode the job's coinbase outputs. Returns 0 and fills total/mine (satoshi) and the number of other
+ * paid outputs, or -1 if the transaction cannot be parsed. */
+static int coinbase_payout(const Job *j, const uint8_t *script, int slen, uint64_t *total, uint64_t *mine, int *others) {
+    static uint8_t cb[2 * MAXCB + 64];
+    int n = 0, pos = 4; uint64_t v;
+    int es = j->en2size > 16 ? 16 : j->en2size;
+    memcpy(cb, j->cb1, j->cb1len); n += j->cb1len;
+    memcpy(cb + n, j->en1, j->en1len); n += j->en1len;
+    memset(cb + n, 0, es); n += es;                 /* extranonce2 sits in the input script, not in the outputs */
+    memcpy(cb + n, j->cb2, j->cb2len); n += j->cb2len;
+    if (n > 6 && cb[4] == 0 && cb[5] == 1) pos = 6; /* segwit marker + flag */
+    if (rd_varint(cb, n, &pos, &v) || v != 1) return -1;          /* one input */
+    pos += 36;
+    if (rd_varint(cb, n, &pos, &v) || v > (uint64_t)n) return -1; /* input script */
+    pos += (int)v + 4;
+    uint64_t nout;
+    if (rd_varint(cb, n, &pos, &nout) || nout > 1000) return -1;
+    *total = *mine = 0; *others = 0;
+    for (uint64_t i = 0; i < nout; i++) {
+        if (pos + 8 > n) return -1;
+        uint64_t val = 0; for (int k = 0; k < 8; k++) val |= (uint64_t)cb[pos + k] << (8 * k);
+        pos += 8;
+        if (rd_varint(cb, n, &pos, &v) || v > (uint64_t)(n - pos)) return -1;
+        if (slen && (int)v == slen && !memcmp(cb + pos, script, slen)) *mine += val;
+        else if (val) (*others)++;
+        *total += val; pos += (int)v;
+    }
+    return 0;
+}
+
+static void payout_check(const Job *j) {
+    static uint8_t script[48]; static int slen = -1;
+    if (slen < 0) slen = addr_to_script(address, script);
+    uint64_t total, mine; int others; char o[64] = "";
+    if (coinbase_payout(j, script, slen, &total, &mine, &others)) { logf_("Payout check: could not decode this job's payout transaction"); return; }
+    if (others) snprintf(o, sizeof o, ", %.8f BTC to %d other output%s", (double)(total - mine) / 1e8, others, others == 1 ? "" : "s");
+    if (!slen) logf_("Payout check: address type not understood, cannot compare (job pays %.8f BTC in total)", (double)total / 1e8);
+    else if (!mine) logf_("Payout check: WARNING - this job pays NOTHING to your address (%.8f BTC goes elsewhere)", (double)total / 1e8);
+    else logf_("Payout check: %.8f BTC (%.2f%%) to YOUR address%s", (double)mine / 1e8, 100.0 * (double)mine / (double)total, o);
+}
+
 static void on_notify(J *p) {
     if (!en1ok || !p || p->t != JARR || p->len < 8) return;
     static Job j; /* only touched by the network thread */
@@ -1108,7 +1194,7 @@ static void on_notify(J *p) {
     gjob = j; jobGen++; haveJob = 1;
     ReleaseSRWLockExclusive(&jobLock);
     char b[32];
-    if (newBlock) logf_("New block template | network difficulty %s", fmtn(j.netdiff, b));
+    if (newBlock) { logf_("New block template | network difficulty %s", fmtn(j.netdiff, b)); payout_check(&j); }
 }
 
 static void log_share_result(long long id, int ok, const char *err);
