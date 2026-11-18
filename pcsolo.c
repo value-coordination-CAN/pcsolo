@@ -16,7 +16,7 @@
 #include <math.h>
 #include <ctype.h>
 
-#define VERSION "pcsolo/1.4"
+#define VERSION "pcsolo/1.5"
 #define MAXCB 4096
 #define MAXBR 32
 #define CHUNK 65536u
@@ -667,11 +667,26 @@ static const char *KSRC_VR =
 "  for (int i = 20; i < 64; i++) W[i] = s1(W[i-2]) + W[i-7] + s0(W[i-15]) + W[i-16];   /* shared by all versions */\n"
 "  #pragma unroll\n"
 "  for (int v = 0; v < NVER; v++) {\n"
-"    __constant uint *X = VD + v * 18;\n"
+"    __constant uint *X = VD + v * 20;   /* VDS */\n"
+"#ifndef EXTRA_PRE\n"
 "    uint a=X[0],b=X[1],c=X[2],d=X[3],e=X[4],f=X[5],g=X[6],h=X[7];\n"
 "    uint t1 = X[16] + w3; h=g; g=f; f=e; e=d+t1; d=c; c=b; b=a; a=t1+X[17];\n"
+"    #define FIRST_ROUND 4\n"
+"#else\n"
+"    /* rounds 3-6: h (and d) are still per-job constants, so h+K+W and d+h+K+W come from the host.\n"
+"       X: [0]=p3+t23 [1]=st3+p3 [2]=st0 [3]=st1 [4]=st4 [5]=st5 [6]/[7]=R4/D4 [16]/[17]=R5/D5 [18]/[19]=R6/D6 */\n"
+"    uint a3 = X[0] + w3, e3 = X[1] + w3;\n"
+"    uint s = S1(e3) + CH(e3, X[4], X[5]);\n"
+"    uint a4 = X[6] + s + S0(a3) + MAJ(a3, X[2], X[3]), e4 = X[7] + s;\n"
+"    s = S1(e4) + CH(e4, e3, X[4]);\n"
+"    uint a5 = X[16] + s + S0(a4) + MAJ(a4, a3, X[2]), e5 = X[17] + s;\n"
+"    s = S1(e5) + CH(e5, e4, e3);\n"
+"    uint a6 = X[18] + s + S0(a5) + MAJ(a5, a4, a3), e6 = X[19] + s;\n"
+"    uint a=a6,b=a5,c=a4,d=a3,e=e6,f=e5,g=e4,h=e3, t1;\n"
+"    #define FIRST_ROUND 7\n"
+"#endif\n"
 "    #pragma unroll\n"
-"    for (int i = 4; i < 64; i++) {\n"
+"    for (int i = FIRST_ROUND; i < 64; i++) {\n"
 "      t1 = h + S1(e) + CH(e,f,g) + K[i] + W[i]; uint t2 = S0(a) + MAJ(a,b,c);\n"
 "      h=g; g=f; f=e; e=d+t1; d=c; c=b; b=a; a=t1+t2;\n"
 "    }\n"
@@ -703,6 +718,8 @@ static const char *KSRC_VR =
 
 #define VR_REQ_MASK 0x1fffe000u   /* BIP 320 general-purpose version bits */
 #define VR_MAX 16
+#define VDS 20                     /* uints of per-version kernel data */
+static int extraPre = 1;           /* --no-extra-pre: rounds 3-6 constant folding off (A/B experiment) */
 static int vrCount = 8;            /* --versions 1|2|4|8|16 (8 measured best: +13.0% vs +10.9% for 4) */
 static int vrLog2 = 3;
 static int secondPre = 1;          /* explicit second-hash round-0 precompute + stop after round 60 (+0.3%, on by default) */
@@ -797,6 +814,7 @@ static int gpu_init(void) {
             uint32_t C0 = IV[7] + BS1(IV[4]) + CHF(IV[4], IV[5], IV[6]) + K[0], T0 = BS0(IV[0]) + MAJF(IV[0], IV[1], IV[2]);
             xn += snprintf(extra + xn, sizeof extra - xn, " -D SECOND_PRE -D SP_A=0x%08xu -D SP_E=0x%08xu", C0 + T0, IV[3] + C0);
         }
+        if (extraPre) xn += snprintf(extra + xn, sizeof extra - xn, " -D EXTRA_PRE");
         if (gpuMaxRegs > 0 && nvVerbose) xn += snprintf(extra + xn, sizeof extra - xn, " -cl-nv-maxrregcount=%d", gpuMaxRegs);
         char opts[320]; snprintf(opts, sizeof opts, "-D NVER=%d%s%s%s", vrCount, nvVerbose ? " -cl-nv-verbose" : "", nocache, extra);
         cl_program pvr = p_clCreateProgramWithSource(ctx, 3, srcs, NULL, &e); if (e) { printf("GPU: program error %d\n", e); return -1; }
@@ -806,7 +824,7 @@ static int gpu_init(void) {
         if (e) { printf("GPU: version-rolling kernel build failed (%d):\n%s\n", e, lg); return -1; }
         gkvr = p_clCreateKernel(pvr, "search_vrn", &e); if (e) { printf("GPU: kernel error %d\n", e); return -1; }
         for (int i = 0; i < 4; i++) {
-            gvd[i] = p_clCreateBuffer(ctx, 4 /* CL_MEM_READ_ONLY */, VR_MAX * 18 * 4, NULL, &e);
+            gvd[i] = p_clCreateBuffer(ctx, 4 /* CL_MEM_READ_ONLY */, VR_MAX * VDS * 4, NULL, &e);
             if (e) { printf("GPU: buffer error %d\n", e); return -1; }
         }
         if (getenv("PCSOLO_KLOG")) printf("---- version-rolling kernel build log (%s) ----\n%s\n----\n", opts, lg);
@@ -870,8 +888,14 @@ static int gpu_scan(const Pre *p, uint32_t n0, size_t count, uint32_t limit, uin
 /* pack per-version kernel data: [v*18 + 0..7] state after rounds 0-2, [8..15] midstate, [16] p3, [17] t23 */
 static void pack_vd(const Pre *pv, int n, uint32_t *vd) {
     for (int v = 0; v < n; v++) {
-        memcpy(vd + v * 18, pv[v].st, 32); memcpy(vd + v * 18 + 8, pv[v].mid, 32);
-        vd[v * 18 + 16] = pv[v].p3; vd[v * 18 + 17] = pv[v].t23;
+        const Pre *p = &pv[v]; uint32_t *x = vd + v * VDS;
+        memcpy(x + 8, p->mid, 32);
+        if (!extraPre) { memcpy(x, p->st, 32); x[16] = p->p3; x[17] = p->t23; continue; }
+        /* --extra-pre layout (see KSRC_VR): rounds 3-6 with the constant h / d terms folded */
+        uint32_t R4 = p->st[6] + K[4] + 0x80000000u, R5 = p->st[5] + K[5], R6 = p->st[4] + K[6];
+        x[0] = p->p3 + p->t23; x[1] = p->st[3] + p->p3;
+        x[2] = p->st[0]; x[3] = p->st[1]; x[4] = p->st[4]; x[5] = p->st[5];
+        x[6] = R4; x[7] = p->st[2] + R4; x[16] = R5; x[17] = p->st[1] + R5; x[18] = R6; x[19] = p->st[0] + R6;
     }
 }
 
@@ -881,7 +905,7 @@ static int gpu_launch_vr(int buf, const uint32_t *vd, const Pre *p0, uint32_t n0
     static const uint32_t zero = 0;
     const uint32_t WC[4] = {p0->w16, p0->w17, p0->w18c, p0->w19c};
     cl_int e = p_clEnqueueWriteBuffer(gq, gout[buf], 0, 0, 4, &zero, 0, NULL, NULL);
-    e |= p_clEnqueueWriteBuffer(gq, gvd[buf], 0, 0, (size_t)vrCount * 18 * 4, vd, 0, NULL, NULL);
+    e |= p_clEnqueueWriteBuffer(gq, gvd[buf], 0, 0, (size_t)vrCount * VDS * 4, vd, 0, NULL, NULL);
     e |= p_clSetKernelArg(gkvr, 0, sizeof(cl_mem), &gvd[buf]);
     e |= p_clSetKernelArg(gkvr, 1, sizeof WC, WC);
     e |= p_clSetKernelArg(gkvr, 2, 4, &n0); e |= p_clSetKernelArg(gkvr, 3, 4, &limit);
@@ -1234,7 +1258,7 @@ static DWORD WINAPI miner(LPVOID arg) {
 typedef struct {
     Job job; uint8_t hdr[80]; char en2hex[40]; Pre pre;
     int vr; uint8_t hv[VR_MAX][80]; Pre pv[VR_MAX]; uint32_t vbits[VR_MAX];   /* version-rolling variants */
-    uint32_t vd[VR_MAX * 18];                                                  /* packed for the kernel */
+    uint32_t vd[VR_MAX * VDS];                                                  /* packed for the kernel */
 } Work;
 
 /* put the bits of v into the lowest set bits of mask */
@@ -1449,7 +1473,7 @@ static int selftest(void) {
     }
     if (useGpu && wantVR) {
         /* version rolling: vrCount header versions sharing one message schedule per nonce */
-        static uint8_t hv[VR_MAX][80]; static Pre pv[VR_MAX]; static uint32_t vb[VR_MAX], vd[VR_MAX * 18];
+        static uint8_t hv[VR_MAX][80]; static Pre pv[VR_MAX]; static uint32_t vb[VR_MAX], vd[VR_MAX * VDS];
         uint32_t vn[128], vv[128];
         make_versions(hdr, VR_REQ_MASK, vrCount, hv, pv, vb);
         pack_vd(pv, vrCount, vd);
@@ -1591,6 +1615,7 @@ static void usage(void) {
            "                          schedule per nonce (needs pool support; falls back automatically)\n"
            "      --versions <n>     header versions per nonce for --version-roll: 1, 2, 4, 8 (default) or 16\n"
            "      --no-second-pre    don't precompute the second hash's first round (experiment)\n"
+           "      --no-extra-pre     don't fold the constant parts of rounds 3-6 (experiment)\n"
            "      --gpu-maxregs <n>  NVIDIA register cap for the version-rolling kernel (experiment; slower here)\n"
            "      --gpu-local <n>    fixed GPU workgroup size (experiment; driver default is fastest here)\n"
            "      --normal-priority  don't drop to idle priority\n"
@@ -1654,6 +1679,8 @@ int main(int argc, char **argv) {
         }
         else if (!strcmp(a, "--second-pre")) secondPre = 1;
         else if (!strcmp(a, "--no-second-pre")) secondPre = 0;
+        else if (!strcmp(a, "--extra-pre")) extraPre = 1;
+        else if (!strcmp(a, "--no-extra-pre")) extraPre = 0;
         else if (!strcmp(a, "--gpu-maxregs")) gpuMaxRegs = atoi(NEXT());
         else if (!strcmp(a, "--gpu-local")) gpuLocal = (size_t)atoi(NEXT());
         else if (!strcmp(a, "--normal-priority")) normalPrio = 1;

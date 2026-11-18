@@ -171,6 +171,31 @@ Findings:
 
 Live with the final defaults (auto threads → 12, ×8 versions, second-hash precompute), 2 minutes on public-pool.io: **342–347 MH/s**, 7 shares accepted from versions v0/v3/v5/v6/v7, 0 rejected.
 
+## Minimum-work audit: rounds 3–6 constant folding (v1.5, 2026-11-18)
+
+Question: does the GPU kernel do only the SHA-256d work that depends on the nonce? Audit of the ×8 version-rolling kernel:
+
+| Saving | Status |
+|---|---|
+| Midstate (header block 1) hashed once per job and version | already done |
+| Rounds 0–2 and the constant half of round 3 precomputed on the host | already done |
+| W16/W17 per-job constants, W18/W19 precomputed apart from their nonce term, zero padding words folded | already done |
+| One message schedule shared by all 8 versions | already done |
+| Second hash: fixed padding words folded, round 0 precomputed, stop after round 60 (only H7 is tested) | already done (v1.4) |
+| Final test: one byte-swap + one compare; full 256-bit check on the CPU for rare candidates only | already done |
+| **New:** in rounds 3–6 the `h` and `d` inputs are still per-job constants, so `h+K+W` and `d+h+K+W` come from the host | **v1.5, default** (`--no-extra-pre` disables) |
+
+Not worth doing on this GPU: precomputing `K[16]+W16` and `K[17]+W17`. NVIDIA's 3-input add (IADD3) already absorbs the extra term, so it saves no instructions.
+
+Result: self-test passes both ways (genesis found, 65/65 (nonce, version) candidates match the scalar path). Same 80 registers, 0 B spill, 25 warps. GPU-only, 8 interleaved rounds of 20 s:
+
+| Rounds | `--no-extra-pre` | `--extra-pre` (new default) | Difference |
+|---|---|---|---|
+| 1–4 (GPU warming up 63 → 78 °C, new always ran second) | 286.8 MH/s | 285.2 MH/s | −0.6%, the same size as the warm-up drift between runs |
+| 5–8 (warm, order reversed: new ran first) | 280.6 MH/s | **281.2 MH/s** | **+0.2%** (higher or equal in all 4 pairs) |
+
+That is the predicted size: about 4 instructions saved out of roughly 1,500 per version-hash. It is at the edge of what the benchmark can resolve, because the rates come in steps of ~0.4 MH/s. The kernel is now at the practical minimum; what remains is the unavoidable ~61 + 60 SHA rounds and two message schedules per hash, and the 31 W power cap sets the speed.
+
 ## Version rolling benchmark (v1.4, 2026-11-17, idle machine)
 
 Interleaved A/B, GPU only, 12 s each:
