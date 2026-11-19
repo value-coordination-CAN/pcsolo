@@ -769,6 +769,7 @@ static const char *KSRC_VR2 =
 "  }\n"
 "}\n";
 static int gpuIlp = 1;             /* --gpu-ilp 2: two versions interleaved per pass (experiment) */
+static int carryNonce = 0;         /* --carry-nonce: continue the nonce counter into the next template (experiment, no effect on odds) */
 
 #define VR_REQ_MASK 0x1fffe000u   /* BIP 320 general-purpose version bits */
 #define VR_MAX 16
@@ -1416,10 +1417,11 @@ static DWORD WINAPI miner(LPVOID arg) {
     uint32_t found[256];
     Pre pre;
     char en2hex[40];
+    uint32_t n0 = 0;                 /* carried across templates when --carry-nonce is set */
     for (;;) {
         if (!haveJob || idx >= activeThreads) { Sleep(100); continue; }
         LONG gen = prep_work(j, cb, hdr, &pre, en2hex);
-        uint32_t n0 = 0;
+        if (!carryNonce) n0 = 0;
         do {
             double pd = poolDiff;
             int nf = scan(&pre, n0, CHUNK, top_limit(pd), found, 256);
@@ -1495,7 +1497,8 @@ static DWORD WINAPI gpu_miner(LPVOID arg) {
                 make_versions(wk[cur]->hdr, vrMask, vrCount, wk[cur]->hv, wk[cur]->pv, wk[cur]->vbits);
                 pack_vd(wk[cur]->pv, vrCount, wk[cur]->vd);
             }
-            n0 = 0; need = 0;
+            if (!carryNonce) n0 = 0;
+            need = 0;
         }
         double pd = poolDiff;
         /* version rolling hashes vrCount headers per nonce: launch 1/vrCount of the nonces so each launch
@@ -1798,6 +1801,7 @@ static void usage(void) {
            "      --no-second-pre    don't precompute the second hash's first round (experiment)\n"
            "      --no-extra-pre     don't fold the constant parts of rounds 3-6 (experiment)\n"
            "      --gpu-ilp 1|2      versions interleaved per pass in the GPU kernel (experiment, default 1)\n"
+           "      --carry-nonce      continue the nonce counter into the next template (experiment, no effect on odds)\n"
            "      --gpu-maxregs <n>  NVIDIA register cap for the version-rolling kernel (experiment; slower here)\n"
            "      --gpu-local <n>    fixed GPU workgroup size (experiment; driver default is fastest here)\n"
            "      --normal-priority  don't drop to idle priority\n"
@@ -1864,6 +1868,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--extra-pre")) extraPre = 1;
         else if (!strcmp(a, "--no-extra-pre")) extraPre = 0;
         else if (!strcmp(a, "--gpu-ilp")) gpuIlp = atoi(NEXT()) == 2 ? 2 : 1;
+        else if (!strcmp(a, "--carry-nonce")) carryNonce = 1;
         else if (!strcmp(a, "--gpu-maxregs")) gpuMaxRegs = atoi(NEXT());
         else if (!strcmp(a, "--gpu-local")) gpuLocal = (size_t)atoi(NEXT());
         else if (!strcmp(a, "--normal-priority")) normalPrio = 1;

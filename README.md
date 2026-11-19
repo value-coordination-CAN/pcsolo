@@ -50,6 +50,14 @@ Every 15 s it prints the hashrate (CPU/GPU split), accepted/rejected shares, bes
 - The definitive check is your address on `https://mempool.space/address/<your address>`. A win is an incoming coinbase payment of ~3.1+ BTC, spendable after 100 confirmations (~17 h).
 - Shares and "best diff" only show the miner is working. A block needs a best diff of about 135T.
 
+## Experiment: carry the nonce across templates (`--carry-nonce`)
+
+By default each worker starts its nonce counter at 0 on every new block template. `--carry-nonce` instead continues the counter from where it was when the template changed.
+
+**It does not change your odds, and that is the point of including it.** A new template is fresh data (new previous-block hash, new merkle root), so nonce *N* in the old template and nonce *N* in the new one give unrelated hashes. Every nonce is equally likely regardless of where the counter starts, and the miner already never repeats work: the extranonce counter only ever increases, so each search uses unique block data whether the nonce resets to 0 or not. Starting high just means the low nonces of that template go unchecked instead — the same number of guesses, equally good.
+
+Added as a measurable control: run it for a day against the default and the share-rate and best-diff distributions are statistically identical. The only lever on time-to-block is hashes per second.
+
 ## Watching new blocks
 
 Each time anyone on the network finds a block, the pool sends work for the next one, and pcsolo logs it:
