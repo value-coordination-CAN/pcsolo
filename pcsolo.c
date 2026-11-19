@@ -770,6 +770,7 @@ static const char *KSRC_VR2 =
 "}\n";
 static int gpuIlp = 1;             /* --gpu-ilp 2: two versions interleaved per pass (experiment) */
 static int carryNonce = 0;         /* --carry-nonce: continue the nonce counter into the next template (experiment, no effect on odds) */
+static int gpuBusy = 0;            /* --gpu-busy: never sleep the GPU feeder, keep the queue full so the driver holds P0 (uses a core) */
 
 #define VR_REQ_MASK 0x1fffe000u   /* BIP 320 general-purpose version bits */
 #define VR_MAX 16
@@ -1517,8 +1518,10 @@ static DWORD WINAPI gpu_miner(LPVOID arg) {
 
         if (inflight == GPU_DEPTH) {
             /* queue full: wait for the oldest. NVIDIA's blocking read spins a core, so sleep through
-             * most of one launch period first - the newer launches keep the GPU busy meanwhile. */
-            if (periodMs > 4) Sleep((DWORD)(periodMs * 0.8));
+             * most of one launch period first - the newer launches keep the GPU busy meanwhile.
+             * --gpu-busy skips the sleep so the feeder spins: the GPU is never left idle and the
+             * driver's adaptive power management keeps it at P0 even while the PC is unattended. */
+            if (!gpuBusy && periodMs > 4) Sleep((DWORD)(periodMs * 0.8));
             int ob = (head - inflight + GPU_DEPTH) % GPU_DEPTH;
             Work *pw = wk[fl[ob].slot];
             int nf = pw->vr ? gpu_collect_vr(ob, found, vis, 127) : gpu_collect(ob, found, 255);
@@ -1802,6 +1805,7 @@ static void usage(void) {
            "      --no-extra-pre     don't fold the constant parts of rounds 3-6 (experiment)\n"
            "      --gpu-ilp 1|2      versions interleaved per pass in the GPU kernel (experiment, default 1)\n"
            "      --carry-nonce      continue the nonce counter into the next template (experiment, no effect on odds)\n"
+           "      --gpu-busy         keep the GPU queue full with no sleep, so it stays at full clock while the PC is idle (uses one CPU core)\n"
            "      --gpu-maxregs <n>  NVIDIA register cap for the version-rolling kernel (experiment; slower here)\n"
            "      --gpu-local <n>    fixed GPU workgroup size (experiment; driver default is fastest here)\n"
            "      --normal-priority  don't drop to idle priority\n"
@@ -1869,6 +1873,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--no-extra-pre")) extraPre = 0;
         else if (!strcmp(a, "--gpu-ilp")) gpuIlp = atoi(NEXT()) == 2 ? 2 : 1;
         else if (!strcmp(a, "--carry-nonce")) carryNonce = 1;
+        else if (!strcmp(a, "--gpu-busy")) gpuBusy = 1;
         else if (!strcmp(a, "--gpu-maxregs")) gpuMaxRegs = atoi(NEXT());
         else if (!strcmp(a, "--gpu-local")) gpuLocal = (size_t)atoi(NEXT());
         else if (!strcmp(a, "--normal-priority")) normalPrio = 1;

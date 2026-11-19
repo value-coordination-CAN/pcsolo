@@ -50,6 +50,12 @@ Every 15 s it prints the hashrate (CPU/GPU split), accepted/rejected shares, bes
 - The definitive check is your address on `https://mempool.space/address/<your address>`. A win is an incoming coinbase payment of ~3.1+ BTC, spendable after 100 confirmations (~17 h).
 - Shares and "best diff" only show the miner is working. A block needs a best diff of about 135T.
 
+## Keeping the GPU at full clock while idle (`--gpu-busy`)
+
+On some laptops the NVIDIA driver's adaptive power management downclocks the GPU when the machine is left unattended, even though the miner is still feeding it. The symptom is the GPU rate dropping to a *steady* fraction of normal (e.g. ~67 MH/s instead of ~280) overnight, while the clock, not the utilisation, is what fell. Note this is triggered by lack of user *activity*, not by the display sleeping, so "monitor never sleeps" alone does not fix it.
+
+The proper fix is **NVIDIA Control Panel → Manage 3D settings → Power management mode → Prefer maximum performance**. If that is unavailable, `--gpu-busy` is a software fallback: the GPU feeder stops sleeping between launches and spins instead, so the queue is never empty and the driver keeps the GPU at P0. Cost: one CPU core is fully used. While the PC is active it makes no difference to speed (both 292.9 MH/s, 99% GPU in testing); the gain only shows when the machine is idle.
+
 ## Experiment: carry the nonce across templates (`--carry-nonce`)
 
 By default each worker starts its nonce counter at 0 on every new block template. `--carry-nonce` instead continues the counter from where it was when the template changed.
